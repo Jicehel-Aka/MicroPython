@@ -10,6 +10,13 @@ sdkconfig.orig_reference
 /components/micropython/micropython_embed/
 /components/micropython/build-embed/
 
+# Archives / gros artefacts (paquet exporte, etc.)
+*.zip
+
+# Cache Python
+__pycache__/
+*.pyc
+
 # Editeur / OS
 *.swp
 *~

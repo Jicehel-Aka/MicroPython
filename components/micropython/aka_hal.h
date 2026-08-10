@@ -55,6 +55,18 @@ const char *aka_hal_language(void);
 const char *aka_hal_tr(const char *key);
 int      aka_hal_screenshot(void);
 
+// --- Son : lecture d'un echantillon PCM 8 bits NON SIGNE (convention des
+// jeux MicroPython Pokitto : upygame.mixer.Sound().play_sfx(data, len, loop))
+// -- convertit en interne vers le format attendu par gb_audio_track_wav
+// (PCM 16 bits signe) et COPIE les donnees (le pointeur Python ne doit pas
+// etre suppose valide au-dela de l'appel).
+void aka_hal_play_pcm8(const uint8_t *data, size_t len, int loop);
+int  aka_hal_is_sound_playing(void);
+// Appelee a chaque frame (par aka_hal_update() lui-meme) : relance la
+// lecture si un bouclage a ete demande et que la piste vient de s'arreter.
+// Ne pas appeler directement depuis modaka.c/Python -- interne au HAL.
+void aka_hal_sound_service(void);
+
 // --- Aide integree au menu systeme AKA ---
 // Lignes d'aide affichees dans l'ecran "Commandes" du menu (touche MENU).
 void aka_hal_set_controls(const char *const *lines, int n);

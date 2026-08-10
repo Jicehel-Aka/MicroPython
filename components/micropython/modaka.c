@@ -244,6 +244,22 @@ static mp_obj_t aka_run_file(mp_obj_t path) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(aka_run_file_obj, aka_run_file);
 
+// aka.play_pcm8(data, loop=False) -- data : bytes/bytearray PCM 8 bits non
+// signe (0..255, 128=silence), convention des jeux MicroPython Pokitto.
+static mp_obj_t aka_play_pcm8(size_t n_args, const mp_obj_t *args) {
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(args[0], &bufinfo, MP_BUFFER_READ);
+    int loop = (n_args > 1) && mp_obj_is_true(args[1]);
+    aka_hal_play_pcm8((const uint8_t *)bufinfo.buf, bufinfo.len, loop);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(aka_play_pcm8_obj, 1, 2, aka_play_pcm8);
+
+static mp_obj_t aka_is_sound_playing(void) {
+    return mp_obj_new_bool(aka_hal_is_sound_playing());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(aka_is_sound_playing_obj, aka_is_sound_playing);
+
 static mp_obj_t aka_set_controls(mp_obj_t lines) {
     size_t n = 0;
     mp_obj_t *items = NULL;
@@ -314,6 +330,8 @@ static const mp_rom_map_elem_t aka_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_ticks_ms),     MP_ROM_PTR(&aka_ticks_ms_obj) },
     { MP_ROM_QSTR(MP_QSTR_sleep_ms),     MP_ROM_PTR(&aka_sleep_ms_obj) },
     { MP_ROM_QSTR(MP_QSTR_vibrate),      MP_ROM_PTR(&aka_vibrate_obj) },
+    { MP_ROM_QSTR(MP_QSTR_play_pcm8),    MP_ROM_PTR(&aka_play_pcm8_obj) },
+    { MP_ROM_QSTR(MP_QSTR_is_sound_playing), MP_ROM_PTR(&aka_is_sound_playing_obj) },
     { MP_ROM_QSTR(MP_QSTR_language),     MP_ROM_PTR(&aka_language_obj) },
     { MP_ROM_QSTR(MP_QSTR_tr),           MP_ROM_PTR(&aka_tr_obj) },
     { MP_ROM_QSTR(MP_QSTR_screenshot),   MP_ROM_PTR(&aka_screenshot_obj) },

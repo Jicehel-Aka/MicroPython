@@ -8,6 +8,7 @@
 #include "gb_common.h"        // SCREEN_WIDTH/HEIGHT, GB_KEY_*
 #include "gb_ll_common.h"     // EXPANDER_KEY_*, JOYX_MID
 #include "gb_audio_player.h"
+#include "gb_audio_track_wav.h"
 #include "core/input.h"
 #include "aka_runtime/aka_runtime.h"
 
@@ -15,6 +16,7 @@
 #include <freertos/task.h>
 #include "esp_timer.h"
 #include <cstring>          // strncpy
+#include <cstdlib>          // realloc
 
 // Instances globales uniques, definies dans main.cpp.
 extern gb_core         g_core;
@@ -61,6 +63,7 @@ int  aka_hal_height(void) { return SCREEN_HEIGHT; }
 // --- Entrees / frame ---
 int aka_hal_update(void) {
     input_poll(g_keys);                    // seul lecteur du bus I2C/ADC
+    aka_hal_sound_service();               // relance le son si bouclage demande et termine
     if (!akaRuntime.update(g_keys)) {      // menu systeme AKA a la main ?
         vTaskDelay(pdMS_TO_TICKS(16));
         return 0;
@@ -79,6 +82,68 @@ void aka_hal_sleep_ms(uint32_t ms) {
     vTaskDelay(t ? t : 1);
 }
 void aka_hal_vibrate(uint32_t ms)     { g_audio_player.vibrator(ms); }
+
+// --- Son (upygame.mixer.Sound) ---
+//
+// gb_audio_track_wav::play_raw() ne fait que STOCKER le pointeur passe (pas
+// de copie) -- le buffer doit donc rester valide pendant toute la lecture.
+// On ne peut pas supposer que l'objet `bytes` Python cote appelant restera
+// vivant/non deplace par le ramasse-miettes : on COPIE systematiquement les
+// echantillons (convertis en 16 bits signe, gb_audio_track_wav l'exige)
+// dans un tampon possede ici, redimensionne au besoin.
+//
+// Pas de bouclage natif dans gb_audio_track_wav (s'arrete tout seul en fin
+// de buffer) -- gere ici via aka_hal_sound_service(), appelee a chaque frame
+// depuis aka_hal_update().
+static gb_audio_track_wav s_sfx_track;
+static bool     s_sfx_track_added = false;
+static int16_t *s_sfx_buffer = nullptr;
+static size_t   s_sfx_buffer_capacity = 0;   // en echantillons
+static size_t   s_sfx_sample_count = 0;
+static bool     s_sfx_loop = false;
+
+static void aka_hal_sound_ensure_track() {
+    if (!s_sfx_track_added) {
+        g_audio_player.add_track(&s_sfx_track, 1.0f);
+        s_sfx_track_added = true;
+    }
+}
+
+void aka_hal_play_pcm8(const uint8_t *data, size_t len, int loop) {
+    if (!data || len == 0) return;
+    aka_hal_sound_ensure_track();
+
+    // (Re)alloue le tampon 16 bits si necessaire -- reutilise sinon (evite
+    // de fragmenter le tas a chaque effet sonore).
+    if (s_sfx_buffer_capacity < len) {
+        int16_t *bigger = (int16_t *)realloc(s_sfx_buffer, len * sizeof(int16_t));
+        if (!bigger) return;   // echec allocation : on abandonne silencieusement
+        s_sfx_buffer = bigger;
+        s_sfx_buffer_capacity = len;
+    }
+
+    // Conversion PCM 8 bits NON SIGNE (0..255, 128=silence) -> 16 bits SIGNE
+    // (convention gb_audio_track_wav / gb_audio_player).
+    for (size_t i = 0; i < len; ++i) {
+        s_sfx_buffer[i] = (int16_t)(((int)data[i] - 128) * 256);
+    }
+    s_sfx_sample_count = len;
+    s_sfx_loop = (loop != 0);
+
+    s_sfx_track.play_raw(s_sfx_buffer, s_sfx_sample_count);
+}
+
+int aka_hal_is_sound_playing(void) {
+    return s_sfx_track_added && s_sfx_track.is_playing() ? 1 : 0;
+}
+
+// Appelee a chaque frame (aka_hal_update) : relance la lecture si un
+// bouclage a ete demande et que la piste vient de s'arreter.
+void aka_hal_sound_service(void) {
+    if (s_sfx_track_added && s_sfx_loop && !s_sfx_track.is_playing() && s_sfx_sample_count > 0) {
+        s_sfx_track.play_raw(s_sfx_buffer, s_sfx_sample_count);
+    }
+}
 const char *aka_hal_language(void)    { return akaRuntime.getLanguage(); }
 const char *aka_hal_tr(const char *k) { return akaRuntime.translate(k); }
 int aka_hal_screenshot(void)          { return akaRuntime.takeScreenshot() ? 1 : 0; }
