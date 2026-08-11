@@ -51,6 +51,10 @@ void     aka_hal_joystick(int *x, int *y);
 uint32_t aka_hal_ticks_ms(void);
 void     aka_hal_sleep_ms(uint32_t ms);
 void     aka_hal_vibrate(uint32_t ms);
+// Suivi de duree fait ICI (pas dans gb_audio_player, dont u32_vibrator_delay
+// est prive) : simple bookkeeping local, aucune modification du composant
+// partage gamebuino necessaire.
+int      aka_hal_is_vibrating(void);
 const char *aka_hal_language(void);
 const char *aka_hal_tr(const char *key);
 int      aka_hal_screenshot(void);

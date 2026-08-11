@@ -14,6 +14,9 @@
 #include "py/gc.h"
 #include "py/runtime.h"
 #include "py/stackctrl.h"
+#include "py/builtin.h"
+#include "py/mperrno.h"
+#include "py/stream.h"
 
 #include "aka_hal.h"
 #include "aka_keys.h"
@@ -21,6 +24,168 @@
 // Marge de securite de pile laissee a MicroPython (octets). Doit rester
 // inferieure a la pile de la tache app_main (cf. sdkconfig.defaults).
 #define AKA_MP_STACK_LIMIT (16 * 1024)
+
+// BUG TROUVE ET CORRIGE (cause racine du "ImportError: no module named X"
+// meme quand le fichier existe bel et bien et que sys.path est correct) :
+// MICROPY_VFS vaut 0 dans ce port (confirme dans mpconfig.h) -- le port DOIT
+// alors fournir lui-meme mp_import_stat() (utilisee par tout le mecanisme
+// d'import pour verifier si un chemin candidat existe, et si c'est un
+// fichier ou un dossier). Cette fonction n'etait jamais implementee nulle
+// part.
+//
+// PREMIERE IMPLEMENTATION (abandonnee) : basee sur stat() (<sys/stat.h>) --
+// n'a pas resolu le probleme malgre une implementation syntaxiquement
+// correcte, ce qui suggere que stat() n'est pas correctement cablee sur ce
+// montage SD/FATFS precis (meme si d'autres fonctions POSIX le sont).
+// Reecrite pour s'appuyer UNIQUEMENT sur fopen()/opendir(), deux mecanismes
+// deja EPROUVES ailleurs dans ce meme fichier (aka_read_file utilise fopen
+// partout ; aka_list_py utilise opendir/readdir avec succes) plutot que sur
+// une fonction encore jamais testee dans ce projet precis.
+// Declaration anticipee (definition plus bas dans ce fichier) -- necessaire
+// car mp_lexer_new_from_file() (juste en dessous) l'utilise avant.
+static char *aka_read_file(const char *path, size_t *out_len);
+
+mp_import_stat_t mp_import_stat(const char *path) {
+    DIR *dp = opendir(path);
+    if (dp) {
+        closedir(dp);
+        return MP_IMPORT_STAT_DIR;
+    }
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        fclose(f);
+        return MP_IMPORT_STAT_FILE;
+    }
+    return MP_IMPORT_STAT_NO_EXIST;
+}
+
+// BUG TROUVE ET CORRIGE : autre point d'ancrage requis par le port des que
+// MICROPY_ENABLE_EXTERNAL_IMPORT=1 -- do_load() (builtinimport.c) appelle
+// mp_lexer_new_from_file() pour lire et tokeniser le .py trouve par
+// mp_import_stat(). Non implementee, meme categorie de manque que
+// mp_import_stat() juste au-dessus. Reutilise aka_read_file() (deja
+// eprouvee, utilisee pour le script principal) plutot qu'une nouvelle
+// mecanique de lecture.
+mp_lexer_t *mp_lexer_new_from_file(qstr filename) {
+    const char *path = qstr_str(filename);
+    size_t len = 0;
+    char *src = aka_read_file(path, &len);
+    if (!src) {
+        mp_raise_OSError(MP_ENOENT);
+    }
+    // free_len = len : le lexer devient proprietaire du buffer et le
+    // liberera lui-meme (aka_read_file alloue via malloc, compatible).
+    return mp_lexer_new_from_str_len(filename, src, len, len);
+}
+
+// BUG TROUVE ET CORRIGE : mp_builtin_open() n'etait pas fournie (ce port n'a
+// pas de VFS -- MICROPY_VFS=0). Sans elle, AUCUN programme MicroPython
+// "standard" utilisant open()/with ne peut fonctionner -- pas seulement
+// upygame/umachine, n'importe quel script qui fait de la lecture/ecriture
+// de fichier normale. Implementee ici plutot que de continuer a contourner
+// au cas par cas (comme aka.file_read/file_write, qui restent disponibles
+// mais ne couvraient que notre propre umachine.py).
+//
+// Modelisee directement sur py/objstringio.c (StringIO/BytesIO, deja
+// present dans ce meme build) : le "protocole de flux" (mp_stream_p_t)
+// fournit juste les callbacks bas niveau read/write/ioctl, et
+// mp_stream_read_obj/write_obj/close_obj (py/stream.c, deja disponibles)
+// fournissent les methodes Python correspondantes automatiquement -- pas
+// besoin de les reimplementer nous-memes.
+typedef struct _aka_file_obj_t {
+    mp_obj_base_t base;
+    FILE *fp;
+} aka_file_obj_t;
+
+static mp_uint_t aka_file_read_stream(mp_obj_t self_in, void *buf, mp_uint_t size, int *errcode) {
+    aka_file_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    if (!self->fp) { *errcode = MP_EBADF; return MP_STREAM_ERROR; }
+    size_t n = fread(buf, 1, size, self->fp);
+    if (n == 0 && ferror(self->fp)) { *errcode = MP_EIO; return MP_STREAM_ERROR; }
+    return n;
+}
+
+static mp_uint_t aka_file_write_stream(mp_obj_t self_in, const void *buf, mp_uint_t size, int *errcode) {
+    aka_file_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    if (!self->fp) { *errcode = MP_EBADF; return MP_STREAM_ERROR; }
+    size_t n = fwrite(buf, 1, size, self->fp);
+    if (n == 0 && size != 0) { *errcode = MP_EIO; return MP_STREAM_ERROR; }
+    return n;
+}
+
+static mp_uint_t aka_file_ioctl(mp_obj_t self_in, mp_uint_t request, uintptr_t arg, int *errcode) {
+    aka_file_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    (void)arg;
+    if (request == MP_STREAM_CLOSE) {
+        if (self->fp) { fclose(self->fp); self->fp = NULL; }
+        return 0;
+    }
+    if (request == MP_STREAM_FLUSH) {
+        if (self->fp) fflush(self->fp);
+        return 0;
+    }
+    *errcode = MP_EINVAL;
+    return MP_STREAM_ERROR;
+}
+
+static void aka_file_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
+    (void)kind;
+    aka_file_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_printf(print, "<aka.file %p>", self->fp);
+}
+
+static const mp_rom_map_elem_t aka_file_locals_dict_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_read), MP_ROM_PTR(&mp_stream_read_obj) },
+    { MP_ROM_QSTR(MP_QSTR_readline), MP_ROM_PTR(&mp_stream_unbuffered_readline_obj) },
+    { MP_ROM_QSTR(MP_QSTR_write), MP_ROM_PTR(&mp_stream_write_obj) },
+    { MP_ROM_QSTR(MP_QSTR_close), MP_ROM_PTR(&mp_stream_close_obj) },
+    { MP_ROM_QSTR(MP_QSTR___enter__), MP_ROM_PTR(&mp_identity_obj) },
+    { MP_ROM_QSTR(MP_QSTR___exit__), MP_ROM_PTR(&mp_stream___exit___obj) },
+};
+static MP_DEFINE_CONST_DICT(aka_file_locals_dict, aka_file_locals_dict_table);
+
+static const mp_stream_p_t aka_file_stream_p = {
+    .read = aka_file_read_stream,
+    .write = aka_file_write_stream,
+    .ioctl = aka_file_ioctl,
+};
+
+MP_DEFINE_CONST_OBJ_TYPE(
+    aka_type_file,
+    MP_QSTR_TextIOWrapper,
+    MP_TYPE_FLAG_ITER_IS_STREAM,
+    print, aka_file_print,
+    protocol, &aka_file_stream_p,
+    locals_dict, &aka_file_locals_dict
+    );
+
+mp_obj_t mp_builtin_open(size_t n_args, const mp_obj_t *args, mp_map_t *kwargs) {
+    (void)kwargs;
+    const char *path = mp_obj_str_get_str(args[0]);
+    const char *mode = (n_args > 1) ? mp_obj_str_get_str(args[1]) : "r";
+
+    // Traduction simplifiee mode Python -> fopen : premiere lettre
+    // (r/w/a/x) + toujours binaire cote C (le "b" ou non du mode Python
+    // n'affecte que l'encodage texte, non gere ici -- coherent avec
+    // l'usage prevu, echange de bytes/bytearray plutot que de texte
+    // encode).
+    char fmode[3] = "rb";
+    if (mode[0] == 'w') fmode[0] = 'w';
+    else if (mode[0] == 'a') fmode[0] = 'a';
+    else if (mode[0] == 'x') fmode[0] = 'w';
+    else fmode[0] = 'r';
+    fmode[1] = 'b';
+    fmode[2] = '\0';
+
+    FILE *fp = fopen(path, fmode);
+    if (!fp) {
+        mp_raise_OSError(MP_ENOENT);
+    }
+    aka_file_obj_t *o = mp_obj_malloc(aka_file_obj_t, &aka_type_file);
+    o->fp = fp;
+    return MP_OBJ_FROM_PTR(o);
+}
+MP_DEFINE_CONST_FUN_OBJ_KW(mp_builtin_open_obj, 1, mp_builtin_open);
 
 // ---------------------------------------------------------------------------
 // Amorcage : init de la VM + execution d'un fichier .py depuis la SD.
@@ -64,6 +229,51 @@ static char *aka_read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
+// BUG TROUVE ET CORRIGE : sys.path n'etait jamais configure -- "import
+// upygame" (ou tout module place a cote du script principal) echouait
+// systematiquement avec ImportError des qu'un jeu est place dans SON PROPRE
+// dossier (/sdcard/<jeu>/), puisque MicroPython ne cherche par defaut que
+// dans ses chemins integres (aucun chemin SD).
+//
+// PREMIERE TENTATIVE (abandonnee) : manipuler directement mp_sys_path /
+// MP_STATE_VM(sys_mutable[...]) depuis le C -- cette structure interne
+// s'est averee incoherente entre les en-tetes generes (runtime.h attend un
+// champ "sys_mutable" que mpstate.h ne definit pas dans cette configuration
+// precise).
+//
+// DEUXIEME TENTATIVE (abandonnee) : executer "import sys; sys.path.insert
+// (...)" via un aka_exec_named() SEPARE, AVANT celui du script principal --
+// confirme par diagnostic (fichier bien trouve sur la carte, insertion
+// executee sans erreur) que le probleme n'est ni le fichier ni la logique
+// de recherche, mais l'ISOLATION entre deux appels aka_exec_named()
+// distincts : chaque compilation/execution semble reinitialiser son propre
+// contexte, la modification de sys.path faite dans le premier appel ne
+// survit pas jusqu'au second.
+//
+// FIX ACTUEL : ne plus faire DEUX executions separees. Construire le prefixe
+// Python (sys.path.insert...) et le PREPENDRE directement au contenu du
+// fichier avant compilation -- les deux s'executent alors comme UNE SEULE
+// unite, partageant necessairement le meme contexte. Effet de bord mineur :
+// les numeros de ligne dans les tracebacks d'erreur du jeu seront decales
+// de +1 (le prefixe tient sur une seule ligne). Acceptable au vu du confort
+// de developpement -- a garder en tete si un "line N" semble incoherent.
+static size_t aka_build_path_prefix(const char *path, char *out, size_t out_cap) {
+    const char *slash = strrchr(path, '/');
+    if (!slash) return 0;
+    size_t dir_len = (size_t)(slash - path);
+    if (dir_len == 0) return 0;
+
+    char dir[256];
+    if (dir_len >= sizeof(dir)) dir_len = sizeof(dir) - 1;
+    memcpy(dir, path, dir_len);
+    dir[dir_len] = '\0';
+
+    int n = snprintf(out, out_cap,
+                      "import sys; sys.path.insert(0, \"%s\")\n", dir);
+    if (n <= 0 || (size_t)n >= out_cap) return 0;
+    return (size_t)n;
+}
+
 static void aka_exec_file(const char *path) {
     size_t len = 0;
     char *src = aka_read_file(path, &len);
@@ -75,7 +285,30 @@ static void aka_exec_file(const char *path) {
         aka_hal_display();
         return;
     }
-    aka_exec_named(path, src, len);
+
+    char prefix[320];
+    size_t prefix_len = aka_build_path_prefix(path, prefix, sizeof(prefix));
+
+    if (prefix_len == 0) {
+        // Pas de repertoire dans le chemin (rare) -- execute tel quel.
+        aka_exec_named(path, src, len);
+    } else {
+        // Concatene prefixe + contenu du fichier dans UN SEUL buffer, execute
+        // comme une seule unite (cf. commentaire au-dessus de
+        // aka_build_path_prefix -- necessaire pour que sys.path.insert()
+        // survive jusqu'au reste du script).
+        char *combined = (char *)malloc(prefix_len + len + 1);
+        if (combined) {
+            memcpy(combined, prefix, prefix_len);
+            memcpy(combined + prefix_len, src, len);
+            combined[prefix_len + len] = '\0';
+            aka_exec_named(path, combined, prefix_len + len);
+            free(combined);
+        } else {
+            aka_exec_named(path, src, len);   // echec allocation -- tente quand meme sans le prefixe
+        }
+    }
+
     free(src);
 }
 
@@ -223,6 +456,11 @@ static mp_obj_t aka_vibrate(mp_obj_t ms) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(aka_vibrate_obj, aka_vibrate);
 
+static mp_obj_t aka_is_vibrating(void) {
+    return mp_obj_new_bool(aka_hal_is_vibrating());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(aka_is_vibrating_obj, aka_is_vibrating);
+
 static mp_obj_t aka_language(void) {
     const char *l = aka_hal_language();
     return mp_obj_new_str(l, strlen(l));
@@ -237,6 +475,39 @@ static MP_DEFINE_CONST_FUN_OBJ_1(aka_tr_obj, aka_tr);
 
 static mp_obj_t aka_screenshot(void) { return mp_obj_new_bool(aka_hal_screenshot()); }
 static MP_DEFINE_CONST_FUN_OBJ_0(aka_screenshot_obj, aka_screenshot);
+
+// aka.file_read(path) -> bytes ou None si absent. Reutilise aka_read_file()
+// (deja eprouvee -- utilisee pour charger le script principal et les
+// modules importes) plutot que d'implementer un type "fichier" Python
+// complet (open() n'est pas fourni par ce port -- voir umachine.py, qui
+// s'appuie sur ces deux fonctions plutot que sur open()/with).
+static mp_obj_t aka_file_read(mp_obj_t path_obj) {
+    const char *path = mp_obj_str_get_str(path_obj);
+    size_t len = 0;
+    char *buf = aka_read_file(path, &len);
+    if (!buf) {
+        return mp_const_none;
+    }
+    mp_obj_t result = mp_obj_new_bytes((const byte *)buf, len);
+    free(buf);
+    return result;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(aka_file_read_obj, aka_file_read);
+
+// aka.file_write(path, data) -> True/False. data : bytes/bytearray/str.
+static mp_obj_t aka_file_write(mp_obj_t path_obj, mp_obj_t data_obj) {
+    const char *path = mp_obj_str_get_str(path_obj);
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(data_obj, &bufinfo, MP_BUFFER_READ);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return mp_const_false;
+    }
+    size_t written = fwrite(bufinfo.buf, 1, bufinfo.len, f);
+    fclose(f);
+    return mp_obj_new_bool(written == bufinfo.len);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(aka_file_write_obj, aka_file_write);
 
 static mp_obj_t aka_run_file(mp_obj_t path) {
     aka_exec_file(mp_obj_str_get_str(path));
@@ -300,6 +571,20 @@ static MP_DEFINE_CONST_FUN_OBJ_1(aka_list_py_obj, aka_list_py);
 // ---------------------------------------------------------------------------
 // Table du module.
 // ---------------------------------------------------------------------------
+// BUG TROUVE ET CORRIGE : MP_QSTR___path__ est utilisee par builtinimport.c
+// (coeur MicroPython, pour la detection paquet/sous-module) -- mais ce
+// fichier n'est apparemment PAS scanne par la generation des QSTR (seul
+// modaka.c l'est explicitement, voir embed.mk : "SRC_QSTR += modaka.c").
+// Resultat : "MP_QSTR___path__ undeclared" des que MICROPY_ENABLE_EXTERNAL_
+// IMPORT active ce code. Fix standard pour ce type de situation : forcer
+// l'enregistrement de la QSTR via une reference INERTE ici (jamais
+// executee), dans un fichier qui EST scanne.
+static const qstr aka_force_qstr_path __attribute__((unused)) = MP_QSTR___path__;
+
+// RAPPEL : toute nouvelle fonction ajoutee ci-dessous (nouveau MP_QSTR_xxx)
+// necessite de relancer ./build_micropython_embed.sh AVANT idf.py build --
+// les QSTR sont pre-generees cote hote, une simple recompilation ESP-IDF ne
+// suffit pas si la liste des fonctions exposees a change.
 static const mp_rom_map_elem_t aka_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__),     MP_ROM_QSTR(MP_QSTR_aka) },
     // graphismes
@@ -330,12 +615,15 @@ static const mp_rom_map_elem_t aka_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_ticks_ms),     MP_ROM_PTR(&aka_ticks_ms_obj) },
     { MP_ROM_QSTR(MP_QSTR_sleep_ms),     MP_ROM_PTR(&aka_sleep_ms_obj) },
     { MP_ROM_QSTR(MP_QSTR_vibrate),      MP_ROM_PTR(&aka_vibrate_obj) },
+    { MP_ROM_QSTR(MP_QSTR_is_vibrating), MP_ROM_PTR(&aka_is_vibrating_obj) },
     { MP_ROM_QSTR(MP_QSTR_play_pcm8),    MP_ROM_PTR(&aka_play_pcm8_obj) },
     { MP_ROM_QSTR(MP_QSTR_is_sound_playing), MP_ROM_PTR(&aka_is_sound_playing_obj) },
     { MP_ROM_QSTR(MP_QSTR_language),     MP_ROM_PTR(&aka_language_obj) },
     { MP_ROM_QSTR(MP_QSTR_tr),           MP_ROM_PTR(&aka_tr_obj) },
     { MP_ROM_QSTR(MP_QSTR_screenshot),   MP_ROM_PTR(&aka_screenshot_obj) },
     { MP_ROM_QSTR(MP_QSTR_run_file),     MP_ROM_PTR(&aka_run_file_obj) },
+    { MP_ROM_QSTR(MP_QSTR_file_read),    MP_ROM_PTR(&aka_file_read_obj) },
+    { MP_ROM_QSTR(MP_QSTR_file_write),   MP_ROM_PTR(&aka_file_write_obj) },
     { MP_ROM_QSTR(MP_QSTR_list_py),      MP_ROM_PTR(&aka_list_py_obj) },
     // aide integree au menu systeme
     { MP_ROM_QSTR(MP_QSTR_set_controls), MP_ROM_PTR(&aka_set_controls_obj) },

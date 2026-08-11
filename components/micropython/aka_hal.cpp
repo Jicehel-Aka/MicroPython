@@ -56,7 +56,35 @@ void aka_hal_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2) {
     gfx.fillTriangle((int16_t)x0, (int16_t)y0, (int16_t)x1, (int16_t)y1, (int16_t)x2, (int16_t)y2);
 }
 void aka_hal_text(int x, int y, const char *s) { gfx.move_cursor((uint16_t)x, (uint16_t)y); gfx.print_str(s); }
-void aka_hal_display(void) { gfx.update(); }
+// BUG TROUVE ET CORRIGE (blocage watchdog recurrent, tache principale) :
+// rien ne limitait la frequence a laquelle un script Python pouvait
+// appeler aka.display() -- gb_config.h documente l'ecran comme limite a
+// 35 fps (~28ms/image), mais un script MicroPython sans pacing explicite
+// (comme le vrai code source de MrRobot, qui ne fait aucun sleep entre
+// deux images) peut appeler display() bien plus vite que le materiel ne
+// peut suivre. Chaque appel individuel finit par attendre un signal
+// materiel (plusieurs boucles d'attente dans gb_ll_lcd.c/gb_graphics.cpp,
+// certaines bornees a 20-40ms, une decouverte non bornee) -- repete assez
+// souvent, meme des attentes bornees individuellement peuvent cumuler
+// assez de temps perdu pour affamer le chien de garde global (5s).
+//
+// Fix structurel plutot que d'continuer a corriger chaque boucle une a
+// une : impose ICI, au niveau natif (donc quel que soit le script Python
+// execute), un intervalle minimum entre deux rafraichissements reels de
+// l'ecran -- le jeu peut appeler display() aussi souvent qu'il veut, seul
+// le RYTHME REEL envoye au materiel est regule.
+#define AKA_MIN_FRAME_INTERVAL_MS 30   // ~33 fps, sous le plafond materiel documente (35 fps)
+
+void aka_hal_display(void) {
+    static uint32_t s_last_display_ms = 0;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t elapsed = now - s_last_display_ms;
+    if (s_last_display_ms != 0 && elapsed < AKA_MIN_FRAME_INTERVAL_MS) {
+        vTaskDelay(pdMS_TO_TICKS(AKA_MIN_FRAME_INTERVAL_MS - elapsed));
+    }
+    gfx.update();
+    s_last_display_ms = (uint32_t)(esp_timer_get_time() / 1000);
+}
 int  aka_hal_width(void)  { return SCREEN_WIDTH; }
 int  aka_hal_height(void) { return SCREEN_HEIGHT; }
 
@@ -81,7 +109,20 @@ void aka_hal_sleep_ms(uint32_t ms) {
     TickType_t t = pdMS_TO_TICKS(ms);
     vTaskDelay(t ? t : 1);
 }
-void aka_hal_vibrate(uint32_t ms)     { g_audio_player.vibrator(ms); }
+static uint32_t s_vibrate_start_ms = 0;
+static uint32_t s_vibrate_duration_ms = 0;
+
+void aka_hal_vibrate(uint32_t ms) {
+    g_audio_player.vibrator(ms);
+    s_vibrate_start_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    s_vibrate_duration_ms = ms;   // ms=0 (arret) -> is_vibrating() renvoie faux immediatement
+}
+
+int aka_hal_is_vibrating(void) {
+    if (s_vibrate_duration_ms == 0) return 0;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    return (now - s_vibrate_start_ms) < s_vibrate_duration_ms ? 1 : 0;
+}
 
 // --- Son (upygame.mixer.Sound) ---
 //
