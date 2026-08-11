@@ -113,7 +113,8 @@ gauche. Les couleurs se donnent en RVB (0-255).
 |----------|-------|
 | `aka.ticks_ms()` | millisecondes depuis le démarrage (entier) |
 | `aka.sleep_ms(ms)` | pause (laisse respirer le système) |
-| `aka.vibrate(ms)` | fait vibrer la console pendant `ms` millisecondes |
+| `aka.vibrate(ms)` | fait vibrer la console pendant `ms` millisecondes (`ms=0` arrête immédiatement) |
+| `aka.is_vibrating()` | `True` si la console est en train de vibrer |
 | `aka.screenshot()` | enregistre une capture d'écran (BMP) sur la SD |
 | `aka.language()` | code langue courant de la console (`"fr"`, `"en"`, …) |
 | `aka.tr("CLE")` | traduit une clé selon la langue (voir aka_runtime) |

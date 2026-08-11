@@ -24,6 +24,31 @@
 #     (pas de bourrage si largeur paire).
 import aka
 
+# --- Mise a l'echelle ecran ---------------------------------------------
+#
+# BUG TROUVE ET CORRIGE : le jeu dessine dans les coordonnees natives
+# Pokitto (220x176), mais aka.pixel()/aka.fill_rect() etc. dessinent en
+# coordonnees ecran AKA BRUTES (320x240) sans aucune mise a l'echelle --
+# le jeu n'occupait donc qu'un coin de l'ecran, non agrandi. _SCALE_NUM/
+# _SCALE_DEN (fraction plutot que flottant, plus sur en entier pur sur
+# MicroPython) etire les coordonnees/tailles des SPRITES vers l'ecran
+# complet, en conservant les proportions (plus petit des deux ratios
+# largeur/hauteur).
+#
+# Le TEXTE (draw.text) n'est PAS mis a l'echelle de la meme facon -- seule
+# sa POSITION l'est, pas la police elle-meme (aka.text() dessine toujours
+# avec la police native, taille fixe) -- sinon le texte grossirait autant
+# que les sprites et se chevaucherait encore plus.
+POKITTO_W, POKITTO_H = 220, 176
+_SCALE_NUM = min(aka.width() * 100 // POKITTO_W, aka.height() * 100 // POKITTO_H)
+_SCALE_DEN = 100
+
+def _sx(v):
+    return (v * _SCALE_NUM) // _SCALE_DEN
+
+def _sy(v):
+    return (v * _SCALE_NUM) // _SCALE_DEN
+
 # --- Constantes d'evenements (memes noms que l'API Pokitto d'origine) -----
 
 NOEVENT = 0
@@ -80,7 +105,9 @@ class Rect:
                 self.y < other.y + other.h and other.y < self.y + self.h)
 
     def __repr__(self):
-        return "Rect(%d,%d,%d,%d)" % (self.x, self.y, self.w, self.h)
+        # "%d,%d,%d,%d" % (tuple) leve TypeError sur cette config MicroPython
+        # minimale -- concatenation simple a la place (cf. umachine.py).
+        return "Rect(" + str(self.x) + "," + str(self.y) + "," + str(self.w) + "," + str(self.h) + ")"
 
 
 # --- Palette globale (16 couleurs, format identique a Pokitto) -------------
@@ -107,7 +134,16 @@ class _Display:
         pass   # aka_hal deja initialise par main.cpp, rien a faire ici
 
     def set_mode(self, *_args, **_kwargs):
-        return screen   # objet ecran unique (voir plus bas)
+        # BUG TROUVE ET CORRIGE : sur le vrai Pokitto, l'ecran est deja
+        # efface au moment de set_mode() -- confirme sur le code source
+        # reel de MrRobot, qui ne fait JAMAIS d'effacement lui-meme (juste
+        # des screen.blit() de sprites, en supposant un fond deja propre).
+        # Sans cet effacement ici, l'ecran AKA garde tout ce qui s'y
+        # trouvait avant (ecran de demarrage "Gamebuino"), et le jeu
+        # dessine par-dessus sans jamais nettoyer.
+        aka.clear(0, 0, 0)
+        aka.display()
+        return screen
 
     def set_palette_16bit(self, values):
         global _palette_rgb565, _palette_rgb8
@@ -125,9 +161,20 @@ display = _Display()
 
 class _Draw:
     def text(self, x, y, s, color_index=3):
+        # BUG TROUVE ET CORRIGE : les jeux Pokitto utilisent parfois des
+        # caracteres de controle (ex: chr(21) chez MrRobot, "Press "+chr(21)+
+        # " to start") comme icones de bouton speciales, dessinees par une
+        # police proprietaire Pokitto -- notre police (celle du gamebuino,
+        # ASCII standard) ne les comprend pas et les rend comme du vide.
+        # Substitution texte lisible pour les codes de controle courants
+        # plutot que de laisser un trou dans le texte.
+        s = (s.replace(chr(21), "[A]")
+              .replace(chr(22), "[B]")
+              .replace(chr(23), "[C]")
+              .replace(chr(24), "[D]"))
         r, g, b = _palette_rgb8[color_index & 0xF]
         aka.set_color(r, g, b)
-        aka.text(x, y, s)
+        aka.text(_sx(x), _sy(y), s)
 
     def set_background_color(self, idx):
         global _background_index
@@ -176,29 +223,43 @@ class Surface:
 
     def blit(self, target_x, target_y, transparent=True):
         """Dessine cette surface a l'ecran, coin haut-gauche a
-        (target_x, target_y). Les pixels dont l'indice de palette vaut
-        _transparent_index sont sautes si transparent=True (comportement
-        par defaut, coherent avec les sprites Pokitto qui utilisent
-        toujours un fond transparent)."""
+        (target_x, target_y) EN COORDONNEES LOGIQUES POKITTO (220x176) --
+        mises a l'echelle vers l'ecran AKA complet (320x240). Les pixels
+        dont l'indice de palette vaut _transparent_index sont sautes si
+        transparent=True (comportement par defaut, coherent avec les
+        sprites Pokitto qui utilisent toujours un fond transparent).
+
+        Chaque pixel LOGIQUE devient un rectangle plein a l'echelle --
+        les bornes exactes (debut de ce pixel jusqu'au debut du suivant)
+        sont recalculees a chaque fois pour eviter tout trou/chevauchement
+        du a l'arrondi (l'echelle n'est pas forcement un nombre entier)."""
         w, h = self.width, self.height
         pixels = self._pixels
         last_idx = -1
         for y in range(h):
-            py = target_y + y
-            if py < 0 or py >= aka.height():
+            py0 = _sy(target_y + y)
+            py1 = _sy(target_y + y + 1)
+            ph = py1 - py0
+            if ph <= 0:
+                ph = 1
+            if py0 >= aka.height() or py0 + ph <= 0:
                 continue
             for x in range(w):
                 idx = _get_pixel_index(pixels, w, x, y)
                 if transparent and idx == _transparent_index:
                     continue
-                px = target_x + x
-                if px < 0 or px >= aka.width():
+                px0 = _sx(target_x + x)
+                px1 = _sx(target_x + x + 1)
+                pw = px1 - px0
+                if pw <= 0:
+                    pw = 1
+                if px0 >= aka.width() or px0 + pw <= 0:
                     continue
                 if idx != last_idx:
                     r, g, b = _palette_rgb8[idx]
                     aka.set_color(r, g, b)
                     last_idx = idx
-                aka.pixel(px, py)
+                aka.fill_rect(px0, py0, pw, ph)
 
 
 class _SurfaceModule:
@@ -262,7 +323,26 @@ class _EventModule:
         n'y en a pas en attente. Contrairement a une vraie file d'evenements,
         cette implementation se base sur aka.pressed()/aka.released() (etat
         de la frame courante) -- suffisant pour les jeux Pokitto qui pollent
-        une touche a la fois par appel dans leur boucle principale."""
+        une touche a la fois par appel dans leur boucle principale.
+
+        BUG TROUVE ET CORRIGE : les jeux Pokitto (MrRobot compris) n'appellent
+        JAMAIS d'equivalent a aka.update() eux-memes -- seulement upygame.
+        event.poll(). Sans l'appel a aka.update() ci-dessous, l'etat des
+        touches (pressed()/released()) ne se rafraichit JAMAIS, et AUCUNE
+        touche n'est plus jamais detectee, quoi qu'il arrive. C'est
+        event.poll() lui-meme qui doit rafraichir le materiel, puisque rien
+        d'autre dans le code du jeu ne le fait -- coherent avec le fait que
+        la vraie API Pokitto gere ca en interne, elle aussi.
+        BUG TROUVE ET CORRIGE (traces de sprites, ecran jamais efface entre
+        deux images) : le jeu ne dessine jamais de fond, seulement des
+        sprites par-dessus (transparent=True) -- sur le vrai Pokitto,
+        l'ecran est visiblement efface automatiquement a un moment donne du
+        cycle materiel. Comme aucune fonction du jeu n'est appelee une fois
+        par frame a part event.poll(), c'est ICI que l'effacement doit se
+        faire, avant que le jeu ne redessine ses sprites."""
+        if not aka.update():
+            return NOEVENT
+        aka.clear(0, 0, 0)
         pressed = aka.pressed()
         released = aka.released()
         for k in _ALL_KEYS:

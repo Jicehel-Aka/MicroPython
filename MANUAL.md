@@ -111,7 +111,8 @@ Colors are given as RGB (0-255).
 |----------|--------|
 | `aka.ticks_ms()` | milliseconds since boot (integer) |
 | `aka.sleep_ms(ms)` | pause (lets the system breathe) |
-| `aka.vibrate(ms)` | vibrate the console for `ms` milliseconds |
+| `aka.vibrate(ms)` | vibrate the console for `ms` milliseconds (`ms=0` stops immediately) |
+| `aka.is_vibrating()` | `True` if the console is currently vibrating |
 | `aka.screenshot()` | save a screenshot (BMP) to the SD card |
 | `aka.language()` | current console language code (`"fr"`, `"en"`, …) |
 | `aka.tr("KEY")` | translate a key according to the language (see aka_runtime) |

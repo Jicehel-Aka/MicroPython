@@ -1,40 +1,52 @@
 # urandom.py — implementation MINIMALE pure Python de getrandbits(), pour ne
 # pas dependre d'un module `random`/`urandom` natif dont le nom exact du
-# drapeau de configuration (MICROPY_PY_RANDOM vs MICROPY_PY_URANDOM selon la
-# version de MicroPython) n'est pas garanti pour ce build precis -- evite un
-# cycle de recompilation complet juste pour verifier un nom de macro.
+# drapeau de configuration n'est pas garanti pour ce build precis.
 #
-# Generateur xorshift32 (Marsaglia) : rapide, tres largement suffisant pour
-# du gameplay (pas un usage cryptographique). Graine initialisee depuis
-# aka.ticks_ms() au premier appel, pour varier d'une partie a l'autre.
+# BUG TROUVE ET CORRIGE : la version precedente utilisait un xorshift32
+# classique, avec des masques comme 0xFFFFFFFF (~4,3 milliards) -- largement
+# au-dela de la plage "petit entier" de cette configuration MicroPython
+# minimale (pas de support des grands entiers active). Meme si ces valeurs
+# n'apparaissent que DANS une fonction, MicroPython doit pouvoir les
+# REPRESENTER des la compilation du module (donc des l'import), d'ou
+# "OverflowError: long int not supported in this build" au tout premier
+# "import urandom", avant meme d'appeler quoi que ce soit.
+#
+# Reecrit autour d'un xorshift 16 bits (toutes les constantes tiennent
+# largement dans un petit entier) -- suffisant pour du gameplay (getrandbits
+# (7) etc.), pas un usage cryptographique. Plafonne a 16 bits par tirage :
+# aucun des jeux vises n'a besoin de plus, et ca evite tout risque de
+# recalculer une valeur intermediaire trop grande a l'execution.
 import aka
 
 _state = 0
 
-def _next32():
+def _next16():
     global _state
     if _state == 0:
-        _state = aka.ticks_ms() | 1   # jamais zero (xorshift bloquerait sinon)
+        _state = (aka.ticks_ms() & 0xFFFF) | 1   # jamais zero (xorshift bloquerait sinon)
     x = _state
-    x ^= (x << 13) & 0xFFFFFFFF
-    x ^= (x >> 17)
-    x ^= (x << 5) & 0xFFFFFFFF
-    x &= 0xFFFFFFFF
+    x ^= (x << 7) & 0xFFFF
+    x ^= (x >> 9)
+    x ^= (x << 8) & 0xFFFF
+    x &= 0xFFFF
     _state = x
     return x
 
 def getrandbits(n):
-    """Renvoie un entier de n bits aleatoires (0 <= n <= 32)."""
+    """Renvoie un entier de n bits aleatoires (0 <= n <= 16)."""
     if n <= 0:
         return 0
-    if n >= 32:
-        return _next32()
-    return _next32() >> (32 - n)
+    if n >= 16:
+        return _next16()
+    return _next16() >> (16 - n)
 
 def seed(n=None):
     """Reinitialise la graine (optionnel -- appele par certains jeux)."""
     global _state
-    _state = (int(n) & 0xFFFFFFFF) or 1 if n is not None else (aka.ticks_ms() | 1)
+    if n is not None:
+        _state = (int(n) & 0xFFFF) or 1
+    else:
+        _state = (aka.ticks_ms() & 0xFFFF) | 1
 
 def randint(a, b):
     """Entier aleatoire dans [a, b] inclus (pas garanti par tous les jeux,
@@ -42,8 +54,8 @@ def randint(a, b):
     span = b - a + 1
     if span <= 0:
         return a
-    return a + (_next32() % span)
+    return a + (_next16() % span)
 
 def random():
     """Flottant aleatoire dans [0.0, 1.0) (fourni par completude)."""
-    return _next32() / 4294967296.0
+    return _next16() / 65536.0

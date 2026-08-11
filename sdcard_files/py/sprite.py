@@ -72,7 +72,10 @@ class Sprite(object):
         return truth(self.__g)
 
     def __repr__(self):
-        return "<%s sprite(in %d groups)>" % (self.__class__.__name__, len(self.__g))
+        # Fix compat AKA (pas dans l'original) : "%s...%d" % (tuple) leve
+        # TypeError sur cette config MicroPython minimale. Concatenation
+        # simple a la place, reste equivalent.
+        return "<" + self.__class__.__name__ + " sprite(in " + str(len(self.__g)) + " groups)>"
 
 
 class AbstractGroup(object):
@@ -225,7 +228,8 @@ class AbstractGroup(object):
         return len(self.sprites())
 
     def __repr__(self):
-        return "<%s(%d sprites)>" % (self.__class__.__name__, len(self))
+        # Fix compat AKA (pas dans l'original), meme raison que Sprite.__repr__.
+        return "<" + self.__class__.__name__ + "(" + str(len(self)) + " sprites)>"
 
 
 class Group(AbstractGroup):

@@ -21,3 +21,8 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
 
 # Optimisation taille (le coeur MicroPython + gamebuino tiennent mieux).
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# Noms de fichiers longs sur la carte SD (necessaire : "micropython" depasse
+# la limite du format court 8.3 -- BUG TROUVE ET CORRIGE, mkdir echouait avec
+# errno=22/EINVAL pour tout dossier d'app dont le nom depasse 8 caracteres).
+CONFIG_FATFS_LFN_HEAP=y
