@@ -130,7 +130,16 @@ void gb_audio_player::pool()
     iPool++;
     */
 
-    while ( gb_ll_audio_fifo_buffer_free() ) // at least 1 buffer
+    // BUG TROUVE ET CORRIGE (blocage watchdog, tache AudioMixTask) : cette
+    // boucle n'avait aucune limite -- si gb_ll_audio_fifo_buffer_free()
+    // reste vrai en continu (ex: aucun flux audio actif ne vide encore le
+    // FIFO cote materiel), pool() ne rend jamais la main, empechant le
+    // vTaskDelay() suivant (dans la tache appelante) de s'executer, d'ou le
+    // declenchement du chien de garde. Limite de securite ajoutee : ne
+    // remplit plus de N tampons par appel, quoi qu'il arrive -- comportement
+    // inchange dans le cas normal (la boucle sort d'elle-meme bien avant).
+    int i_safety_guard = 32;
+    while ( gb_ll_audio_fifo_buffer_free() && i_safety_guard-- > 0 ) // at least 1 buffer
     {
         int8_t i8_buffer_ready = 0;
         static int16_t i16_audio_buffer_out[ GB_AUDIO_BUFFER_SAMPLE_COUNT];

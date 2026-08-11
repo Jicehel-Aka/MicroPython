@@ -499,14 +499,45 @@ uint32_t gb_ll_lcd_get_draw_count()
 
 void lcd_refresh()
 {
-    while( u8_refresh_ctr == 0 );  // wait last update compleped ( DMA )
+    // BUG TROUVE ET CORRIGE (blocage watchdog CPU0, tache principale) :
+    // cette boucle n'avait AUCUNE limite -- si le fanion de fin de transfert
+    // DMA (u8_refresh_ctr) ne se met jamais a jour (ex: aka.display()
+    // rappelee avant que le transfert precedent soit reellement termine),
+    // elle tourne indefiniment, empechant tout le reste de s'executer.
+    // Contrairement aux deux boucles "scanline" juste en dessous (qui ont
+    // deja leur propre limite de 20ms), celle-ci n'en avait pas. Meme
+    // limite ajoutee par coherence -- au pire un accroc visuel occasionnel,
+    // largement preferable a un blocage complet.
+    {
+        uint64_t start_us = gb_get_micros();
+        while ( u8_refresh_ctr == 0 )  // wait last update compleped ( DMA )
+        {
+            if ( ( gb_get_micros() - start_us ) > 20000 )
+            {
+                printf( "ERROR : Loop DMA-wait timeout\n" );
+                break;
+            }
+        }
+    }
     u8_refresh_ctr = 0;            // reset complete dma flag
     #ifdef USE_VSYCNC
       // Sync to Scanline
+      // BUG POTENTIEL RECONSIDERE : gb_config.h documente ce mecanisme comme
+      // synchronise a 70/35 fps -- a 35fps, une image complete prend ~28ms,
+      // depassant deja le seuil de 20ms ci-dessous. Un appel a aka.display()
+      // frequent (ex: toutes les 16ms cote script Python) peut donc
+      // legitimement devoir attendre PLUS de 20ms le prochain repere de
+      // trame, sans qu'il s'agisse d'un vrai blocage -- chaque "timeout"
+      // pris individuellement est inoffensif (sort proprement), mais leur
+      // REPETITION a chaque frame peut cumuler assez de temps perdu pour
+      // declencher le chien de garde global (5s) sur la duree. Marge
+      // elargie a 40ms (au-dela de la periode a 35fps) plutot que de
+      // desactiver purement et simplement USE_VSYCNC (partage avec tous
+      // les autres portages, qui n'ont jamais signale ce symptome).
     uint64_t start_us = gb_get_micros();
     while ( digitalRead( LCD_FMARK ) )
     {
-        if ( ( gb_get_micros() - start_us ) > 20000 )
+        if ( ( gb_get_micros() - start_us ) > 40000 )
         {
             printf( "ERROR : Loop scanline 1 timeout\n" );
             break;
@@ -517,7 +548,7 @@ void lcd_refresh()
     start_us = gb_get_micros();
     while ( digitalRead( LCD_FMARK ) == 0 )
     {
-        if ( ( gb_get_micros() - start_us ) > 20000 )
+        if ( ( gb_get_micros() - start_us ) > 40000 )
         {
             printf( "ERROR : Loop scanline 0 timeout\n" );
             break;
