@@ -53,15 +53,22 @@ extern "C" void app_main(void) {
 
     // Aide/credits par defaut (un script .py peut les remplacer via
     // aka.set_controls([...]) / aka.set_credits(...)).
+    // BUG TROUVE ET CORRIGE : ce texte par defaut depassait le cadre du
+    // menu "Commandes" (boite de 240px, texte a partir de x=52 -- les
+    // lignes les plus longues, ex: "MENU (long) : capture ecran", debordaient
+    // a l'affichage). Raccourci. De toute facon, chaque jeu (breakout,
+    // invader, pong, snake, tetris, puissance4, bataille_navale) definit
+    // maintenant ses propres commandes via aka.set_controls([...]) des son
+    // demarrage -- ce texte-ci ne sert que de repli, avant qu'un jeu ne
+    // soit choisi dans le selecteur.
     static const char *const kControls[] = {
-        "Fleches : deplacer",
-        "A / B : action",
-        "MENU (court) : ce menu",
-        "MENU (long) : capture ecran",
-        "RUN + MENU : quitter",
+        "Fleches : bouger",
+        "A/B : action",
+        "MENU : ce menu",
+        "RUN+MENU : quitter",
         nullptr
     };
-    aka_hal_set_controls(kControls, 5);
+    aka_hal_set_controls(kControls, 4);
     aka_hal_set_credits("MicroPython AKA", "MicroPython + AKA Port Studio",
                         "MIT", "micropython.org");
 
